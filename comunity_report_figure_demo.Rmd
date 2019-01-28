@@ -1,0 +1,928 @@
+---
+title: "Community Report Data Viz Demo"
+output: 
+  flexdashboard::flex_dashboard:
+    vertical_layout: scroll
+    theme: yeti
+params:
+  port: "Stonington"
+  port_alt: "STONINGTON_ME"
+  top: 7
+---
+
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+
+x <- c("sqldf", "tidyverse", "RcppRoll", "ggthemes", "moments", "gridExtra", "broom", "viridis",
+       "ggsci","ggstance", "cowplot", "wesanderson", "kableExtra", "formattable", "UpSetR", "flexdashboard",
+       "ggmap", "ggrepel", "treemap")
+
+options(scipen = 999)  
+
+lapply(x, require, character.only = TRUE) ##applying the function require to each point in the vector x
+
+```
+
+
+```{r, echo =FALSE, warning=FALSE, include=FALSE}
+
+#data processing step for agg cfders 82 - 2015
+
+gdpdef <- as_tibble(read.csv("C:/Users/brian/Dropbox/COCA/DATA/GMRI_aggregated data/GDPDEF.csv", header = TRUE))
+
+##geo table 
+geo_table <- as_tibble(read.csv("C:/Users/brian/Dropbox/COCA/DATA/GMRI_aggregated data/geo_table.csv", header = TRUE))
+
+##raw landings file
+#byport_thin <- as_tibble(read.csv("//LAZ/Shared/Research/2015_2018_COCA/2_Data/Basic Info/Data/raw_data/byport_thin.csv", header = TRUE))
+all_port_landings <- as_tibble(read.csv("C:/Users/brian/Dropbox/COCA/DATA/GMRI_aggregated data/byport_thin.csv", 
+                                        header = TRUE)) %>% 
+  left_join(., gdpdef, by = c("YEAR" = "year")) %>%
+  left_join(., geo_table, by = c("PORT_CODE")) %>% 
+  mutate(value_2009 = (value / GDPDEF) * 100) %>% 
+  na.omit() %>% 
+  rename(spp = SPECIES, year = YEAR) 
+
+
+#summary ports 
+all_port_spp <- all_port_landings %>% 
+  group_by(year, port_tidy, spp) %>% 
+    summarise(spp_value = sum(value),
+      spp_value_2009 = sum(value_2009),
+      lbs = sum(lbs))
+
+
+top_x_port <- function(a, b) ##processing function
+{
+  filter <- all_port_spp %>% filter(port_tidy == a)
+  
+  top <- filter %>% 
+    group_by(year) %>% 
+    top_n(5, spp_value) %>% #top 5 most frequent 
+    arrange(year, desc(spp_value))
+  
+  spp_list <- top %>% group_by(spp) %>% 
+    count(spp) %>% ungroup() %>% 
+    top_n(b, n) #taking top n (b) most frequent top 5 species
+  
+  top_list <- filter %>% 
+    group_by(spp) %>% 
+    mutate(
+      spp_10 = case_when(
+        !spp %in% spp_list$spp ~ "Other", #if not on the list you can't get it in
+        TRUE ~ as.character(spp))) #if on list then spp = spp_10
+
+#defining variables for lapply
+    
+years <- c(seq(min(top$year), max(top$year), by = 1)) #vector to run through
+spp <- unique(top_list$spp_10)
+n_spp = length(spp)
+
+
+  bind <- function(years) {
+    cbind(year = rep(years, n_spp), # n of years = n of species
+          fake =rep(0, n_spp), # of 0s = n of species 
+          spp)
+  }
+#apply function    
+fake_list <- lapply(years, bind)  
+
+#converting list to dataframe
+fake_df <- as_tibble(do.call(rbind.data.frame, fake_list)) %>% 
+              mutate(
+                year = as.numeric(as.character(year)),
+                fake = as.numeric(as.character(fake)),
+                spp = as.character(spp))
+
+
+  top_10_sum <- top_list %>% 
+    group_by(year, spp_10) %>% 
+    summarise(
+      value = sum(spp_value),
+      value_2009 = sum(spp_value_2009),
+      volume = sum(lbs)) %>% 
+        right_join(. , fake_df, by = c("year" = "year", "spp_10" = "spp")) %>% 
+          mutate_if(is.numeric, funs(ifelse(is.na(.), 0, .))) ##replacing NA w/ zeros
+  
+  return(data.frame(top_10_sum))
+}
+
+
+top_10_sum <- top_x_port(params$port_alt, params$top)
+
+
+  #sensible output!!! 
+  top_prop <- top_10_sum %>% 
+      group_by(year) %>% 
+        summarise(total_value = sum(value)) %>% 
+          ungroup() %>% 
+            left_join(., top_10_sum, by = "year") %>% 
+              group_by(spp_10, year) %>% 
+                mutate(prop = (value / total_value)) %>% 
+                  arrange(year)
+  
+##issue arising from years in which one of the 'top species' does not appear.  
+
+  totals_df <- top_10_sum %>% group_by(year) %>% 
+    summarize(total_value = sum(value),
+              total_2009 = sum(value_2009),
+              total_volume = sum(volume))
+
+```
+
+```{r, include=FALSE}
+#REGIONAL FIGURES FOR COMPARISON
+  #inflation adjusted and nominal dollars are treated differently here due to index calc
+  #infaltion adjusted is used for index, so nominal dollars has been marked as value_nom and inflation renamed
+  #at the end to value_2009
+
+lme_state <- as_tibble(read.csv("C:/Users/brian/Dropbox/COCA/DATA/GMRI_aggregated data/NMFS_state_annual.csv", header = TRUE)) %>%
+  filter(value_nocomma > 0, State %in%
+                c('Maine', 'New Hampshire', 'Massachusetts', 'Rhode Island', 'Connecticut', 
+                  'New York', 'New Jersey', 'Delaware', 'Maryland', 'Virginia', 'North Carolina')) %>%
+            dplyr::select(year = Year, state = State, spp = Species, value = Value, value_2009,
+                          lbs = Pounds) %>%  #renaming variables
+                mutate( mega_subregion = case_when(                                    #creating region names
+      state %in% c('Maine', 'New Hampshire') ~ 'N. New England',
+      state %in% c('Massachusetts') ~ 'S. New England',
+      state %in% c('Rhode Island', 'Connecticut', 'New York') ~ 'N. Mid Atlantic',
+      state %in% c('New Jersey', 'Delaware', 'Maryland', 'Virginia', 'North Carolina') ~ 'S. Mid Atlantic'),
+         mega_subregion = factor(mega_subregion, 
+                                       levels = c("N. New England", "S. New England",
+                                                  "N. Mid Atlantic","S. Mid Atlantic")))
+
+lme_state_total <- sqldf(" select distinct year, state, sum(value_2009) as total_value, sum(value) as value_nom,
+sum(lbs) as total_volume
+                            from lme_state
+                              group by year, state
+                                order by year, state, total_value ")
+  
+lme_state_spp <- sqldf(" select distinct year, spp, state, sum(value_2009) as value
+                            from lme_state
+                              group by year, spp, state
+                                order by year, state, value")
+
+index_calc <- left_join(lme_state_spp, lme_state_total, 
+                  by = c("year" = "year", "state" = "state")) %>%  ##join spp and total rows 
+                mutate(temp_index = (value / total_value)^2) %>% 
+                    group_by(year, state) %>% 
+                        mutate(index = 1/ sum(temp_index)) %>% 
+                          distinct(year, state, total_value, value_nom, total_volume, index) %>% 
+                              arrange(state, year) %>% na.omit()
+
+###creating rolling metrics as input dataset for figures
+lme_state_roll <- index_calc %>% 
+  group_by(state) %>%   ###grouping by subregion for the rolling metric--v. important 
+    mutate(index_roll = roll_mean(index, 4, na.rm = TRUE, align = "right", fill = NA),  ##average index_value
+           rev_var = roll_sd(total_value, 4, na.rm = TRUE, align = "right", fill = NA), ##average sd of rev
+           rev_mean = roll_mean(total_value, 4, na.rm = TRUE, align = "right", fill = NA), ##average mean of rev
+           rev_cv = rev_var / rev_mean) %>%  ##Cv of rev our revenue volatility measure
+              filter(year > 1981) %>% 
+                rename(value_2009 = total_value)
+
+#creating ref_list of ports and regions and filtering out so only correct region is displayed in chart
+state_region <- lme_state %>% distinct(state)
+
+#filter data_set
+port_region <- geo_table %>% filter(port_tidy == params$port_alt) %>% 
+  dplyr::select(port_tidy, statename) %>% 
+    left_join(.,state_region, by = c("statename"  = "state"))
+
+region_input <- lme_state_roll %>% filter(state == port_region$statename)
+```
+
+
+
+
+```{r, include = FALSE}
+gear_agg <- function(input_data){sqldf("select *,  
+            case
+          when NEGEAR_NAME in('BEAM TRAWL, OTHER/NK SPECIES', 'BEAM TRAWL,FISH',
+            'OTTER TRAWL, BEAM','OTTER TRAWL, BOTTOM,FISH',
+            'OTTER TRAWL, BOTTOM,OTHER', 'OTTER TRAWL, BOTTOM,SCALLOP',
+            'OTTER TRAWL, BOTTOM,SHRIMP','OTTER TRAWL, HADDOCK SEPARATOR',
+            'OTTER TRAWL, MIDWATER','OTTER TRAWL, RUHLE',
+            'OTTER TRAWL,BOTTOM,TWIN','PAIR TRAWL, MIDWATER',
+            'TRAWL,OTTER,BOTTOM PAIRED','TRAWL,OTTER,BOTTOM,FISH',
+            'TRAWL,OTTER,BOTTOM,OTHER/NK SPECIES',
+            'TRAWL,OTTER,BOTTOM,SCALLOP','TRAWL,OTTER,BOTTOM,SHRIMP',
+            'TRAWL,OTTER,MIDWATER', 'TRAWL,OTTER,MIDWATER PAIRED')  then 'Trawl'
+
+          when NEGEAR_NAME in('PURSE SEINE, OTHER/NK SPECIES','SEINE, PURSE')    then 'Purse-Seine'
+          
+          when NEGEAR_NAME in('POT, CONCH/WHELK',    'POT, CRAB',
+            'POT, EEL', 'POT, FISH', 'POT, HAG',    'POT, LOBSTER',
+            'POT, OTHER','POT/TRAP, LOBSTER INSH NK',
+            'POT/TRAP, LOBSTER OFFSH NK', 'POTS + TRAPS, HAGFISH',
+            'POTS + TRAPS,EEL', 'POTS + TRAPS,FISH',
+            'POTS + TRAPS,OTHER/NK SPECIES', 'TRAP')          then 'Pots / Traps'
+            
+          when NEGEAR_NAME in('LONGLINE, BOTTOM', 'LONGLINE, PELAGIC')      then 'Longline'
+            
+          when NEGEAR_NAME in('GILL NET, ANCHORED-FLOATING, FISH', 'GILL NET, DRIFT,LARGE MESH',
+            'GILL NET, DRIFT,SMALL MESH','GILL NET, DRIFT-SINK, FISH',
+            'GILL NET, FIXED OR ANCHORED,SINK, OTHER/NK SPECIES',
+            'GILL NET, OTHER','GILL NET, RUNAROUND', 'GILL NET, SINK')     then 'Gillnet'
+            
+          when NEGEAR_NAME in('DREDGE, CLAM','DREDGE, OCEAN QUAHOG/SURF CLAM',
+            'DREDGE, OTHER','DREDGE, OTHER/NK SPECIES',
+            'DREDGE, SCALLOP,SEA','DREDGE, SCALLOP-CHAIN MAT',
+            'DREDGE, SURF CLAM + OCEAN QUAHO','DREDGE, URCHIN',
+            'DREDGE,SCALLOP,CHAIN MAT,MOD')                             
+                then 'Dredge'
+
+            else 'Other' end as gear_type
+            from input_data")}
+``` 
+
+
+```{r, echo =FALSE, warning=FALSE, include=FALSE}
+
+cfders_big<- as_tibble(read.csv("C:/Users/brian/Dropbox/COCA/DATA/GMRI_aggregated data/cfders/cfders_div.csv", header = TRUE)) %>% 
+  filter(PORT_STATE %in% c('ME', 'NH', 'MA', 'RI', 'CT', 
+                                        'NY', 'NJ', 'DE', 'MD', 'VA', 'NC')) %>% 
+     mutate( mega_subregion = case_when(                                 
+      PORT_STATE %in% c('ME', 'NH') ~ 'Northern New England',
+      PORT_STATE %in% c('MA') ~ 'Southern New England',
+      PORT_STATE %in% c('RI', 'CT', 'NY') ~ 'Northern Mid Atlantic',
+      PORT_STATE %in% c('NJ', 'DE', 'MD', 'VA', 'NC') ~ 'Southern Mid Atlantic'),
+      mega_subregion = factor(mega_subregion, 
+                              levels = c("Northern New England", "Southern New England",
+                                         "Northern Mid Atlantic","Southern Mid Atlantic"))) %>% 
+        left_join(., geo_table, by = c("PORT" = "PORT_CODE")) %>% 
+          filter(port_tidy == params$port_alt) %>% na.omit() %>% 
+            gear_agg(.) #using sql script to clasify gears into palletable categories 
+
+#filter(YEAR %in% c(2002, 2008, 2012), #temp approach, first middle and end
+
+gear_totals <- cfders_big %>% 
+              group_by(YEAR) %>%
+                summarize(total_value = sum(value),
+                       total_vessels = n_distinct(HULLNUM))
+
+gear_subtotals <- cfders_big %>% 
+  group_by(YEAR, gear_type) %>% 
+    summarize(v_count = n_distinct(HULLNUM),
+                       value = sum(value))
+      
+gear_input <- left_join(gear_totals, gear_subtotals, by = c("YEAR")) %>% 
+                  group_by(YEAR) %>% 
+                              mutate(
+                              prop_value = value / total_value)
+
+
+gear_check <- gear_subtotals %>% group_by(YEAR) %>% 
+  summarize(summed = sum(value))
+
+#not sure if this is any better than a stacked area...
+
+
+#huge issue here, dramatic increase in other, but UNKNOWN specifically
+gear_subtotals_other <- cfders_big %>% filter(gear_type == "Other") %>% 
+  group_by(YEAR, NEGEAR_NAME) %>% 
+    summarize(v_count = n_distinct(HULLNUM),
+                       value = sum(value))
+
+##input for treemaps
+#i need to compute top 5 spp by gear type for last 5 years to make:
+    #treemap w/ gear type as main group w/ spp as sub group/ potential conflict with 'other' here. 
+
+gear_spp <- cfders_big %>% filter(YEAR > 2009) %>%  #subsetting dataset
+              group_by(gear_type, spp) %>% 
+                summarise(value = mean(sum(value)))
+
+all_spp_bygear <- gear_spp %>% distinct(spp)
+
+top_spp_bygear <- gear_spp %>% 
+  top_n(5,value) %>% 
+    distinct(spp)
+
+spp_include <- all_spp_bygear %>% 
+  group_by(gear_type, spp) %>% 
+  mutate(
+    spp_top = case_when(
+      !spp %in% top_spp_bygear$spp ~ "Other", #if not on the list you can't get it in
+      TRUE ~ as.character(spp))) #if on list then spp = spp_10
+
+library(formattable)
+
+gear_spp_input <- gear_spp %>% 
+  left_join(., spp_include, by = c("gear_type", "spp")) %>% 
+    group_by(gear_type, spp_top) %>% 
+      summarise(value = currency(mean(value),0))
+
+
+
+# of unqique trips
+
+#PRIMARY PORT CALCULATION -- Vessel ####
+#need to make this annual and then we can make the quick and dirty plots for fishing activity
+cfders_big_nofilter <- as_tibble(read.csv("C:/Users/brian/Dropbox/COCA/DATA/GMRI_aggregated data/cfders/cfders_div.csv", header = TRUE)) %>% 
+  filter(PORT_STATE %in% c('ME', 'NH', 'MA', 'RI', 'CT', 
+                                        'NY', 'NJ', 'DE', 'MD', 'VA', 'NC')) %>% 
+     mutate( mega_subregion = case_when(                                 
+      PORT_STATE %in% c('ME', 'NH') ~ 'Northern New England',
+      PORT_STATE %in% c('MA') ~ 'Southern New England',
+      PORT_STATE %in% c('RI', 'CT', 'NY') ~ 'Northern Mid Atlantic',
+      PORT_STATE %in% c('NJ', 'DE', 'MD', 'VA', 'NC') ~ 'Southern Mid Atlantic'),
+      mega_subregion = factor(mega_subregion, 
+                              levels = c("Northern New England", "Southern New England",
+                                         "Northern Mid Atlantic","Southern Mid Atlantic"))) %>% 
+        left_join(., geo_table, by = c("PORT" = "PORT_CODE")) %>%
+            gear_agg(.) %>% 
+               filter(!HULLNUM %in% c("", "000000"), !VESSEL_NAME == "FROM_SHORE") #filtering out unassigned and blanks
+  
+boat_year_gear <- cfders_big_nofilter %>% 
+          filter(port_tidy == params$port_alt) %>% 
+            group_by(YEAR,  gear_type) %>% 
+              summarize(vcount = n_distinct(HULLNUM))
+
+
+  #boat * year
+  boat_year_total <- cfders_big_nofilter %>% 
+            group_by(YEAR, HULLNUM) %>% 
+               summarize(total_value = sum(value)) %>%  
+                  arrange(HULLNUM, YEAR, total_value)
+
+  #boat * port * year
+  boat_port <- cfders_big_nofilter %>% filter(!HULLNUM %in% c("", "000000"), !VESSEL_NAME == "FROM_SHORE") %>%   
+    group_by(YEAR, HULLNUM, port_tidy) %>% 
+      summarise(port_boat = sum(value))
+  
+  #primary port 
+  primary_port <- left_join(boat_port, boat_year_total, by = c("HULLNUM", "YEAR")) %>% 
+    group_by(HULLNUM, YEAR) %>% 
+    mutate(
+      proportion = port_boat / total_value,
+      pport = ifelse(proportion == max(proportion), "primary", "secondary")) %>% 
+    select(YEAR,HULLNUM, port_tidy, proportion, pport) %>% 
+          filter(port_tidy == params$port_alt)  %>%       #filtering on the paramaterized port  
+              na.omit()
+
+#  gear_primary_port <- cfders_big_nofilter %>% 
+ #   left_join(., primary_port, by = "HULLNUM") %>% 
+  #    na.omit() %>%  
+   #       group_by(YEAR,  gear_type, pport) %>% 
+    #          summarize(vcount = n_distinct(HULLNUM))
+  
+  
+
+
+```
+
+
+
+```{r, echo=FALSE, include=FALSE}
+#caclulating index and volatility
+##INDEX CALC -- Vessel ####, using inflation adjusted!!!
+  #port * year
+  port_year <- all_port_spp %>% 
+            group_by(year, port_tidy) %>% 
+               mutate(total_value = sum(spp_value_2009)) %>% 
+                distinct(year, port_tidy, total_value) %>% 
+                  arrange(port_tidy, year, total_value)
+
+  #spp * port * year
+  spp_port_year <- all_port_spp %>% 
+              group_by(year, spp, port_tidy) %>% 
+                 mutate(value = sum(spp_value_2009)) %>% 
+                    distinct(year, spp, port_tidy, value) %>% 
+                       arrange(port_tidy, year, value)
+  
+  #index calculation 
+  port_index_calc <- left_join(port_year, spp_port_year, 
+                      by = c("year" = "year", "port_tidy" = "port_tidy")) %>% 
+                        mutate(temp_index = (value / total_value)^2) %>% 
+                          group_by(year, port_tidy) %>% 
+                            mutate(index = 1/ sum(temp_index)) %>%
+                              distinct(year, port_tidy, total_value, index, rev_cv) %>% 
+                              arrange(port_tidy, year) %>% na.omit() 
+  #volatility calculation
+  cv_div_input_file <- port_index_calc %>% ungroup() %>% group_by(port_tidy) %>% 
+                          mutate(
+                              rev_var = roll_sd(total_value, 4, na.rm = TRUE, align = "right", fill =NA),
+                              rev_mean = roll_mean(total_value, 4, na.rm = TRUE, align = "right", fill = NA),
+                              rev_cv = rev_var / rev_mean) %>% 
+                                  filter(year > (min(year) + 2))
+  
+
+```
+
+```{r, echo=FALSE, include=FALSE}
+#map data 
+
+#coordinates
+port_tidy <- as.character(c("STONINGTON_ME", "PORTLAND_ME", "NEWBEDFORD_MA", "POINTJUDITH_RI"))
+port_nice <- c("Stonington, ME", "Portland, ME", "New Bedford, MA", "Point Judith, RI")
+long <- c(-68.666020, -70.256821, -70.927660, -71.490010)
+lat <- c(44.155650, 43.659100, 41.634050, 41.366010)
+
+port_info <- data.frame(port_tidy, port_nice, long, lat)
+
+#index info
+agg_index <- cv_div_input_file %>% 
+    filter(port_tidy %in% c("STONINGTON_ME", "PORTLAND_ME", "NEWBEDFORD_MA", "POINTJUDITH_RI"),
+         between(year, 2011,2015)) %>%
+          group_by(port_tidy) %>% 
+            summarise(
+              mean_index = mean(index),
+              mean_cv = mean(rev_cv))
+
+#summarizing landings data, not paramaterized
+port_landings <- all_port_landings %>% 
+  filter(port_tidy %in% c("STONINGTON_ME", "PORTLAND_ME", "NEWBEDFORD_MA", "POINTJUDITH_RI"),
+         between(year, 2011,2015)) %>%
+  group_by(year, port_tidy) %>% 
+  summarise(value = sum(value),
+            value_2009 = sum(value_2009),
+            lbs = sum(lbs)) %>% ungroup() %>% 
+    group_by(port_tidy) %>% 
+      summarise(
+        value = mean(value),
+        value_2009 = mean(value_2009),
+        lbs = mean(lbs)) %>% 
+            left_join(., port_info, by = "port_tidy") %>% 
+              left_join(., agg_index, by  = "port_tidy") %>% 
+  mutate(
+    value_2009 = currency(value_2009, digits = 0),
+    value = currency(value, digits = 0))
+
+state <- map_data("state") %>% 
+  filter(region %in% c("maine", "new hampshire", "massachusetts", "rhode island"))
+
+         
+         #, "new york", "connecticut", "new jersey", "maryland", "delaware", "virginia", "north carolina"))
+
+```
+
+```{r, echo=FALSE, warning=FALSE, include=FALSE}
+
+#input data: totals_df (ports), region_input (for states)
+
+#goal sparklines for val, vol, div, and vol w/ the inflation convention for value charts
+
+#datasets for da stuff, later try to do this as a function...
+#year / region / vatiable / value 
+#1995 / state / volatility / 1.3
+
+#data we need
+port_input <- cv_div_input_file %>% filter(port_tidy == params$port_alt) %>%
+  dplyr::select(year, region = port_tidy, rev_cv, index) %>% 
+    left_join(., totals_df, by = "year") %>% 
+mutate(class = case_when(
+    year > 0 ~ "port")) %>% 
+      rename(value_2009 = total_2009)
+
+region_data <- region_input %>% 
+  dplyr::select(year, region = state, total_value = value_nom, value_2009, 
+                total_volume, index, rev_cv) %>% 
+    mutate(class = case_when(
+    year > 0 ~ "state")) %>% 
+      filter(year %in% port_input$year)
+
+#extracting a single state value to order the factor
+state_name <- as.data.frame(region_data %>% ungroup() %>% 
+  mutate(region = as.character(region)) %>% 
+  distinct(region))
+  
+state_name[1,1]
+
+#format the variables here
+temp_state_port <- union(port_input, region_data) %>% 
+  arrange(class, year) %>% 
+    mutate(
+      total_value = currency(total_value/1000000,digits = 0),
+      value_2009 = currency(value_2009 / 1000000, digits = 0),
+      total_volume = comma(total_volume/1000000, digits = 0)) %>% 
+        ungroup() %>% 
+    mutate(
+      region = factor(region, levels = c(params$port_alt, state_name)))
+
+
+long_input <-gather(temp_state_port, variable, value, -year, -region, - class)
+
+#quart input dataset
+quarts <- long_input %>% 
+  group_by(class, variable) %>% 
+    summarise(q25 = quantile(value, .25),
+      q75 = quantile(value, .75)) %>% 
+        right_join(long_input)
+
+#points and labels input dataset, may have to separate to accomodate commas and large # 
+
+pl_max <- long_input %>% 
+  group_by(class, variable) %>% 
+    summarise(
+      max = max(value)) %>% 
+        left_join(long_input, by = c("class", "variable", "max" ="value"))%>% 
+          mutate(max = round(max, digits =2))
+
+pl_min <- long_input %>% 
+  group_by(class, variable) %>% 
+    summarise(
+      min = min(value)) %>% 
+        left_join(long_input, by = c("class", "variable", "min" ="value")) %>% 
+          mutate(min = round(min, digits =2))
+  
+#need to get some nice looking port / region names 
+#format number labels 
+#pad labels 
+#sort start year diff
+  
+test_2 <- function(column){
+
+    #quartiles
+quart_input <- quarts %>% filter(variable == column)
+  
+  #points and labels
+label_max <- pl_max %>% filter(variable == column)
+label_min <- pl_min %>% filter(variable == column)  
+
+ggplot(data = temp_state_port, aes_string(x="year", y = column))+
+    facet_grid(region ~ ., scales = "free_y") +
+  geom_ribbon(data = quart_input, aes(x = year, ymin = q25, max = q75), inherit.aes = FALSE,
+              colour = "grey70", alpha = .1) +
+        geom_line(size = 0.45) +
+     geom_point(data = label_max, aes(x = year, y = max), colour = "red") +
+     geom_point(data = label_min, aes(x = year, y = min), colour = "blue") +
+     ggrepel::geom_text_repel(data = label_max, aes(x = year, y = max, label = max), vjust = 2, hjust = 0.5, direction = "x") +
+     ggrepel::geom_text_repel(data = label_min, aes(x = year, y = min, label = min), vjust = -1, hjust = 0.5) +
+        theme_bw() + 
+          theme(
+            axis.title.x = element_blank(),
+            panel.grid.major = element_blank(), 
+            panel.grid.minor = element_blank(),
+            panel.background = element_blank(),
+            aspect.ratio = .25)
+}
+
+
+
+test_2("total_volume") + 
+  scale_y_continuous(labels = scales::comma, expand = c(0.1, 0))
+
+```
+
+
+
+Port Level Trends
+=====================================  
+
+Column 
+-------------------------------------
+
+```{r}
+ 
+
+ggplot() +
+  geom_polygon(data = state, aes(long, lat, group = group), colour = "black", alpha = .06)+
+  geom_point(data = port_landings, 
+             aes(long, lat, label = port_nice),
+             alpha = .8, size = 3) +  
+    scale_fill_viridis() +
+  ggrepel::geom_label_repel(data = port_landings %>% filter(!port_tidy == params$port_alt), 
+                aes(x=long, y=lat, label = port_nice), nudge_x = -.2, nudge_y = 1) +
+  ggrepel::geom_label_repel(data = port_landings %>% filter(port_tidy == params$port_alt),
+                aes(x=long, y=lat, label = port_nice),nudge_x = -.2, nudge_y = 1,
+                colour = "red") + 
+        coord_fixed(1.3) +
+  ggtitle("Four COCA Ports",
+          subtitle = "Port of Interest Highlighted in Red") +
+   theme_map() 
+
+  
+```
+
+Column {.tabset}
+-------------------------------------
+
+###Species Over Time
+
+```{r, echo=FALSE, warning=FALSE}
+
+  area <- ggplot(top_prop, aes(x=year, y=prop)) +
+    geom_area(aes(fill = fct_reorder2(spp_10, year, prop, .desc = FALSE)),  #ordering factor based on proportion
+              alpha = .6, size=.4, colour="black") + 
+    labs(fill = "Species", scale) +
+    scale_y_continuous(name = "% of Total Landings Value", labels = scales::percent) +
+    theme_bw() +
+    scale_fill_gdocs() +
+    labs(title =paste("Proportion of Total Landings Value: Top", params$top, "Species", sep=" "),
+         subtitle = paste("Top", params$top, "species = top", params$top, "most frequently top", params$top, sep=" ")) +
+  scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+      theme(legend.position = "right",
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            axis.title.x = element_blank())
+  area
+
+```
+
+
+###Landings Trend
+
+```{r}
+
+state_trend_value <- ggplot(region_input, aes(year, value_nom/1000000)) + 
+    geom_line(color = "black", size = 1.2) + 
+    geom_line(data = region_input, aes(year, value_2009/1000000), color = "red", alpha = .4 ) + 
+    theme_bw() +
+    labs(title = paste(region_input$state,": \nTotal Value", sep ="")) +
+        scale_y_continuous(name = "Millions of $") + expand_limits(y=0)+
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+        theme(axis.title.x = element_blank())
+
+state_trend_volume <- ggplot(region_input, aes(year, total_volume / 1000000)) + 
+    geom_line(color = "black", size = 1.2) + 
+    theme_bw() +
+    labs(title = paste(region_input$state,": \nTotal Volume", sep ="")) +
+    scale_y_continuous(name = "Millions of lbs") + expand_limits(y=0) +
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+    theme(axis.title.x = element_blank())
+ 
+
+trend <- ggplot(totals_df, aes(year, total_value/1000000)) + 
+    geom_line(color = "black", size = 1.2) + 
+    geom_line(data = totals_df, aes(year, total_2009/1000000), color = "red", alpha = .4 ) + 
+    theme_bw() +
+    labs(title = paste(params$port,": Total Value", sep =""),
+         subtitle = "Value plotted in nominal (black) and 2009 dollars (red)") +
+        scale_y_continuous(name = "Millions of $") + expand_limits(y=0)+
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+        theme(axis.title.x = element_blank())
+
+trend_volume <- ggplot(totals_df, aes(year, total_volume / 1000000)) + 
+    geom_line(color = "black", size = 1.2) + 
+    theme_bw() +
+    labs(title = paste(params$port,": Total Volume", sep =""),
+    subtitle = "No adjustment made") +
+    scale_y_continuous(name = "Millions of lbs") + expand_limits(y=0) +
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+    theme(axis.title.x = element_blank())
+
+value <- cowplot::plot_grid(trend, state_trend_value, ncol = 2, rel_widths = c(2,1))
+
+volume <- cowplot::plot_grid(trend_volume, state_trend_volume, ncol = 2, rel_widths = c(2,1))
+
+  cowplot::plot_grid(value, volume, nrow = 2)
+
+```
+
+###Volatility and Diversity 
+
+```{r}
+vol_div_input <- cv_div_input_file %>% filter(port_tidy == params$port_alt)
+
+state_trend_div <- ggplot(region_input, aes(year, index_roll)) + 
+    geom_line(color = "black", size = 1.2) + 
+    theme_bw() +
+    labs(title = paste(region_input$state,": \nRevenue Diversity", sep ="")) +
+    scale_y_continuous(name = "Diversity Index") + expand_limits(y=0) +
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+    theme(axis.title.x = element_blank())  
+
+
+state_trend_vol <- ggplot(region_input, aes(year, rev_cv)) + 
+    geom_line(color = "black", size = 1.2) + 
+    theme_bw() +
+    labs(title = paste(region_input$state,": \nRevenue Volatility", sep ="")) +
+    scale_y_continuous(name = "CV of Revenues") + expand_limits(y=0) +
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+    theme(axis.title.x = element_blank())
+
+
+trend_diversity <- ggplot(vol_div_input, aes(year, index)) + 
+    geom_line(color = "black", size = 1.2) + 
+    theme_bw() +
+    labs(title = paste(params$port,": Revenue Diversity", sep =""),
+    subtitle = "Using Inverse Simpons Diversity Index and 2009 Dollars") +
+    scale_y_continuous(name = "Diversity Index") + expand_limits(y=0) +
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+    theme(axis.title.x = element_blank())  
+
+trend_volatility <- ggplot(vol_div_input, aes(year, rev_cv)) + 
+    geom_line(color = "black", size = 1.2) + 
+    theme_bw() +
+    labs(title = paste(params$port,": Revenue Volatility", sep =""),
+    subtitle = "Using four year rolling CV of annual revenues and 2009 Dollars") +
+    scale_y_continuous(name = "CV of Revenues") + expand_limits(y=0) +
+    scale_x_continuous(breaks = seq(min(top_prop$year), max(top_prop$year), by = 8))+
+    theme(axis.title.x = element_blank())
+
+  diversity <- cowplot::plot_grid(trend_diversity, state_trend_div, ncol = 2, rel_widths = c(2,1))
+  
+  volaility <- cowplot::plot_grid(trend_volatility, state_trend_vol, ncol = 2, rel_widths = c(2,1))
+  
+  cowplot::plot_grid(diversity, volaility, nrow = 2)
+
+```
+
+### Landings Trend (alt)
+```{r}
+
+#protocol here is use this function to output raw plot and then format / title as we go...
+
+value <- test_2("total_value") + 
+  scale_y_continuous(labels = scales::dollar) + 
+ # labs(title = paste(params$port,": Total Value and Volume", sep =""),
+  #       subtitle = "Value plotted in nominal (black) and 2009 dollars (red) with \nState-Level values provided for comparison") +
+  ylab("Millions of $") +
+    geom_line(data = temp_state_port, aes(year, value_2009),
+              color = "red", size = 0.3)
+
+volume <- test_2("total_volume")+ 
+  scale_y_continuous(labels = scales::comma) + 
+#  labs(title = paste(params$port,": Total Landings", sep =""),
+ #        subtitle = "No Adjustments Made, State-level values provided for comparison") +
+  ylab("Millions of lbs")
+
+
+
+
+title <- ggdraw() + draw_label(paste(params$port,": Total Landings Value and Volume", sep =""), fontface='bold', size = 11)
+
+subtitle <- ggdraw() + draw_label("Value plotted in nominal (black) and 2009 dollars (red)", fontface='bold', size = 9)
+
+  cowplot::plot_grid(title, subtitle, value, volume, ncol = 1, rel_heights = c(.1,.1,1,1))
+  
+
+
+```
+
+
+###Volatility and Diversity (alt)
+
+```{r, echo=FALSE, warning=FALSE}
+
+#spark lines for vol and div
+
+vol <- test_2("rev_cv") + 
+  scale_y_continuous(labels = scales::comma) + 
+  #labs(title = paste(params$port,": Revenue Volatility", sep =""),
+   #      subtitle = "State-level values provided for comparison" ) +
+  ylab("CV of Annual Revenues")
+
+div <- test_2("index") + 
+  scale_y_continuous(labels = scales::comma) + 
+ # labs(title = paste(params$port,": Revenue Diversity", sep =""),
+  #       subtitle = "Using Inverse Simpons Diversity Index and 2009 Dollars with \nState-level values provided for comparison") +
+  ylab("Revenue Diversity")
+
+
+title <- ggdraw() + draw_label(paste(params$port,": Revenue Diversity and Volatility", sep =""), fontface='bold', size = 11)
+
+subtitle <- ggdraw() + draw_label("Inverse Simpsons Diversity Index and CV of Annual Revenues used, respectively", fontface='bold', size = 0)
+
+  cowplot::plot_grid(title, subtitle,  div, vol, ncol = 1, rel_heights = c(.1,.1,1,1))
+
+
+
+
+```
+
+###Shelfwide Comparison
+
+```{r, echo=FALSE, warning=FALSE}
+
+#5 yr avg
+vol_div_5yr <- cv_div_input_file %>% 
+  filter(year > 2009) %>% 
+    group_by(port_tidy) %>% 
+      summarise(
+        avg_index = mean(index),
+        avg_vol = mean(rev_cv),
+        avg_value = mean(total_value)) %>% 
+            left_join(., port_info, by = "port_tidy")
+
+#scatter plot 
+ggplot() + 
+  geom_point(data = vol_div_5yr %>% filter(!port_tidy  == params$port_alt), 
+             aes(avg_index, avg_vol),
+            alpha = .4, size = 1) + 
+  geom_point(data = vol_div_5yr %>% filter(port_tidy  == params$port_alt), 
+             aes(avg_index, avg_vol, label = port_nice),
+             colour = "red", alpha = .8, size = 4) +
+     ggrepel::geom_label_repel(data = vol_div_5yr %>% filter(!port_tidy == params$port_alt),
+                aes(avg_index, avg_vol, label = port_nice), nudge_y = .7) +
+   ggrepel::geom_label_repel(data = vol_div_5yr %>% filter(port_tidy == params$port_alt),
+                aes(avg_index, avg_vol, label = port_nice),
+                colour = "red", nudge_y = 1, nudge_x = .4) +
+  scale_x_continuous(breaks = c(0,4,8,12)) +
+  scale_y_continuous(breaks = c(0,1,2)) + 
+  ggtitle("Revenue Volatility vs. Revenue Diversity",
+          subtitle = "5 yr average (2010 - 2014)") +
+  xlab("Revenue Diversity") + 
+  ylab("Revenue Volatility ") +
+      theme_bw()
+
+```
+
+Fishing Activity 
+=====================================  
+
+Column{.tabset} 
+-------------------------------------
+
+###Gear Type over Time
+```{r, echo=FALSE, warning=FALSE}
+
+#area chart
+
+ggplot(gear_input, aes(x=YEAR, y=prop_value)) +
+    geom_area(aes(fill = fct_reorder2(gear_type, YEAR, prop_value, .desc = FALSE)),  #ordering factoro
+              alpha = .6, size=.4, colour="black") + 
+    labs(fill = "Gear Type", scale) +
+    scale_y_continuous(name = "% of Total Landings Value", labels = scales::percent) +
+    theme_bw() +
+    scale_fill_gdocs() +
+    labs(title ="Value Share by Gear Type",
+         subtitle = "Excluding unreported gears") +
+  scale_x_continuous(breaks = c(2002, 2008, 2014))+
+      theme(legend.position = "right",
+            panel.grid.major = element_blank(),
+            panel.grid.minor = element_blank(),
+            axis.title.x = element_blank())
+```
+
+### Gear Type and Species
+```{r, echo=FALSE, warning=FALSE}
+#treemap
+
+ treemap(gear_spp_input,
+      #essential decisions
+        title = paste(params$port,":Share of Total Value by Gear Type, \nSpecies as Sub-Groups", sep=" "),
+        index = c("gear_type", "spp_top"),                   #groups and subgroups
+        vSize = "value",                                     #value to scale rectangles by
+        vColor = "value",                                    #what to set the scale too, in this case landings value
+        palette="Set3",                                      #maine color pallete 
+        type = "value",
+              #label color and allignment   
+              fontcolor.labels=c("black","grey25"),
+              fontsize.labels = c(14,10),
+              bg.labels = 0,
+              align.labels=list(
+                c("left", "top"), 
+                c("center", "center")),                                   
+              overlap.labels=1,  
+                    #border decisions
+                border.col = c("white", "white"),
+                border.lwds=c(7,1),
+                aspRatio = 2.3,
+                title.legend = "Average Annual Landings (USD): 2010 - 2015")
+
+
+
+```
+
+
+
+Column {.tabset}
+------------------------------------- 
+### Vessels 
+
+```{r, echo=FALSE, warning=FALSE}
+
+primary_port %>% group_by(YEAR, pport) %>% 
+  summarise(
+    vcount = n_distinct(HULLNUM)) %>% 
+  ggplot(data = ., aes(YEAR, vcount, fill = pport)) + 
+    geom_bar(stat = "identity", alpha = .7) + 
+      theme_bw() + 
+        ggtitle(paste("Vessels Landing at ",params$port,": 2010 - 2014", sep = ""),
+                      subtitle = paste("'Primary' = majority of vessel landings occur in ", params$port, sep = "")) +
+          xlab("Year") + ylab("Unique Vessels") +
+            scale_fill_tableau() +
+              theme(panel.border = element_blank(), 
+                    panel.grid.major = element_blank(),
+                        panel.grid.minor = element_blank())
+
+
+```
+
+### Unique Vessels by Gear Type
+
+```{r}
+
+  ggplot(data = boat_year_gear, aes(YEAR, vcount, fill = gear_type)) + 
+    geom_bar(stat = "identity", alpha = .7) + 
+      theme_bw() + 
+        ggtitle(paste("Unique Vessel by Gear Type at ",params$port,": 2010 - 2014", sep = "")) +
+          xlab("Year") + ylab("Unique Vessels") +
+            scale_fill_tableau() +
+              theme(panel.border = element_blank(), 
+                    panel.grid.major = element_blank(),
+                        panel.grid.minor = element_blank()) + 
+                          guides(fill=guide_legend(title="Gear Type"))
+
+```
+
+
+
+
+
+
+
+
+
+
